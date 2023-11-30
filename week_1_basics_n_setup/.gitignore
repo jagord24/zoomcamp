@@ -2,5 +2,7 @@
 2_docker_sql/ny_taxi_postgres_data
 2_docker_sql/dtc_postgres_volume_local
 2_docker_sql/output.csv.gz
+2_docker_sql/output.parquet
+2_docker_sql/taxi+_zone_lookup.csv
 2_docker_sql/yellow_tripdata_2021-01.csv
 2_docker_sql/yellow_tripdata_2021-01.parquet
