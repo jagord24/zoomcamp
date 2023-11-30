@@ -1,7 +1,7 @@
 import os
 import argparse
 from time import time
-# import pyarrow.parquet as pq
+import pyarrow.parquet as pq
 import pandas as pd
 from sqlalchemy import create_engine
 
@@ -16,45 +16,71 @@ def main(params):
 
     # the backup files are gzipped, and it's important to keep the correct extension
     # for pandas to be able to open the file
-    if url.endswith('.csv.gz'):
-        csv_name = 'output.csv.gz'
-    else:
-        csv_name = 'output.csv'
-
-    os.system(f"wget {url} -O {csv_name}")
-
     engine = create_engine(f'postgresql://{user}:{password}@{host}:{port}/{db}')
 
-    df_iter = pd.read_csv(csv_name, iterator=True, chunksize=100000)
+    if url.endswith('.parquet'):
 
-    df = next(df_iter)
 
-    df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
-    df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
+        output_name = 'output.parquet'
 
-    df.head(n=0).to_sql(name=table_name, con=engine, if_exists='replace')
+        os.system(f"wget {url} -O {output_name}")
+        parquet_file = pq.ParquetFile(output_name)
+        parquet_size = parquet_file.metadata.num_rows
 
-    df.to_sql(name=table_name, con=engine, if_exists='append')
-    
-    while True: 
+        df = pq.read_table(output_name).to_pandas()
+        df.head(n=0).to_sql(name=table_name, con=engine, if_exists='replace')
 
-        try:
+        # default (and max) batch size
+        index = 65536
+        for i in parquet_file.iter_batches(use_threads=True):
             t_start = time()
-            
-            df = next(df_iter)
-
-            df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
-            df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
-
-            df.to_sql(name=table_name, con=engine, if_exists='append')
-
+            print(f'Ingesting {index} out of {parquet_size} rows ({index / parquet_size:.0%})')
+            i.to_pandas().to_sql(name=table_name, con=engine, if_exists='append')
+            index += 65536
             t_end = time()
+            print(f'\t- it took %.1f seconds' % (t_end - t_start))
 
-            print('inserted another chunk, took %.3f second' % (t_end - t_start))
+        # df.to_sql(name=table_name, con=engine, if_exists='append')
+    
+    else:
+        if url.endswith('.csv.gz'):
+            csv_name = 'output.csv.gz'
+        else:
+            csv_name = 'output.csv'
 
-        except StopIteration:
-            print("Finished ingesting data into the postgres database")
-            break
+        os.system(f"wget {url} -O {csv_name}")
+
+
+        df_iter = pd.read_csv(csv_name, iterator=True, chunksize=100000)
+
+        df = next(df_iter)
+
+        df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
+        df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
+
+        df.head(n=0).to_sql(name=table_name, con=engine, if_exists='replace')
+
+        df.to_sql(name=table_name, con=engine, if_exists='append')
+    
+        while True: 
+
+            try:
+                t_start = time()
+                
+                df = next(df_iter)
+
+                df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
+                df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
+
+                df.to_sql(name=table_name, con=engine, if_exists='append')
+
+                t_end = time()
+
+                print('inserted another chunk, took %.3f second' % (t_end - t_start))
+
+            except StopIteration:
+                print("Finished ingesting data into the postgres database")
+                break
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Ingest data to Postgres")
