@@ -1,9 +1,11 @@
 import os
 import argparse
 from time import time
-import pyarrow.parquet as pq
+# import pyarrow.parquet as pq
 import pandas as pd
 from sqlalchemy import create_engine
+import requests
+import zipfile
 
 def main(params):
     user = params.user
@@ -13,74 +15,48 @@ def main(params):
     db = params.db
     table_name = params.table_name
     url = params.url
+    file_name = params.file_name
 
     # the backup files are gzipped, and it's important to keep the correct extension
     # for pandas to be able to open the file
     engine = create_engine(f'postgresql://{user}:{password}@{host}:{port}/{db}')
 
-    if url.endswith('.parquet'):
+    subfolder = 'indego_data'
+    os.makedirs(subfolder, exist_ok=True)
 
+    url = 'https://bicycletransit.wpenginepowered.com/wp-content/uploads/2023/10/indego-trips-2023-q3.zip'
+    response = requests.get(url)
+    with open(os.path.join(subfolder, 'indego-trips-2023-q3.zip'), 'wb') as f:
+        f.write(response.content)
 
-        output_name = 'output.parquet'
+    with zipfile.ZipFile(os.path.join(subfolder, 'indego-trips-2023-q3.zip'), 'r') as zip_ref:
+        zip_ref.extractall(subfolder)
 
-        os.system(f"wget {url} -O {output_name}")
-        parquet_file = pq.ParquetFile(output_name)
-        parquet_size = parquet_file.metadata.num_rows
+    df_iter = pd.read_csv(os.path.join(subfolder, file_name), iterator=True, chunksize=100000)
+    df = next(df_iter)
+    df['end_lat'] = pd.to_numeric(df['end_lat'], errors='coerce')
 
-        df = pq.read_table(output_name).to_pandas()
-        df.head(n=0).to_sql(name=table_name, con=engine, if_exists='replace')
+    df.head(n=0).to_sql(name=table_name, con=engine, if_exists='replace')
+    df.to_sql(name=table_name, con=engine, if_exists='append')
+    while True: 
 
-        # default (and max) batch size
-        index = 65536
-        for i in parquet_file.iter_batches(use_threads=True):
+        try:
             t_start = time()
-            print(f'Ingesting {index} out of {parquet_size} rows ({index / parquet_size:.0%})')
-            i.to_pandas().to_sql(name=table_name, con=engine, if_exists='append')
-            index += 65536
+            
+            df = next(df_iter)
+
+            df['end_lat'] = pd.to_numeric(df['end_lat'], errors='coerce')
+
+
+            df.to_sql(name=table_name, con=engine, if_exists='append')
+
             t_end = time()
-            print(f'\t- it took %.1f seconds' % (t_end - t_start))
 
-        # df.to_sql(name=table_name, con=engine, if_exists='append')
-    
-    else:
-        if url.endswith('.csv.gz'):
-            csv_name = 'output.csv.gz'
-        else:
-            csv_name = 'output.csv'
+            print('inserted another chunk, took %.3f second' % (t_end - t_start))
 
-        os.system(f"wget {url} -O {csv_name}")
-
-
-        df_iter = pd.read_csv(csv_name, iterator=True, chunksize=100000)
-
-        df = next(df_iter)
-
-        df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
-        df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
-
-        df.head(n=0).to_sql(name=table_name, con=engine, if_exists='replace')
-
-        df.to_sql(name=table_name, con=engine, if_exists='append')
-    
-        while True: 
-
-            try:
-                t_start = time()
-                
-                df = next(df_iter)
-
-                df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
-                df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
-
-                df.to_sql(name=table_name, con=engine, if_exists='append')
-
-                t_end = time()
-
-                print('inserted another chunk, took %.3f second' % (t_end - t_start))
-
-            except StopIteration:
-                print("Finished ingesting data into the postgres database")
-                break
+        except StopIteration:
+            print("Finished ingesting data into the postgres database")
+            break
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Ingest data to Postgres")
@@ -100,6 +76,7 @@ if __name__ == '__main__':
     parser.add_argument("--db", help="database for postgres")
     parser.add_argument("--table_name", help="name of destination table")
     parser.add_argument("--url", help="url of data to ingest")
+    parser.add_argument("--file_name", help="name of file to ingest from within the .zip")
 
     args = parser.parse_args()
 
